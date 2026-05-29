@@ -40,3 +40,16 @@ type OutputScanner interface {
 	Name() string
 	ScanChunk(ctx *RequestContext, chunk *Chunk) (*ScanResult, error)
 }
+
+
+// OpenAI 标准聊天请求协议结构
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ChatCompletionRequest struct {
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+}

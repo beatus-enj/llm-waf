@@ -1,6 +1,5 @@
 package gateway
 import (	
-	"fmt"	
 	"log"
 )
 type WafEngine struct {	
@@ -38,40 +37,28 @@ func (e *WafEngine) ExecuteInputPipeline(ctx *RequestContext, prompt string) (st
 	return currentPrompt, &ScanResult{Action: ActionAllow}
 }
 
-// ExecuteOutputPipeline 建立流式过滤管道：通过协程和 Channel 动态拦截/改写 LLM 输出
-func (e *WafEngine) ExecuteOutputPipeline(ctx *RequestContext, llmStream <-chan Chunk, finalStream chan<- Chunk) {	
-	go func() {		
-		defer close(finalStream)
+// ExecuteOutputPipeline 建立流式过滤管道：单步同步审计/改写 LLM 输出的当前 Token
+func (e *WafEngine) ExecuteOutputPipeline(ctx *RequestContext, chunk *Chunk) *ScanResult {
+	// 依次通过输出层安全插件链
+	for _, scanner := range e.OutputPipeline {
+		res, err := scanner.ScanChunk(ctx, chunk)
+		if err != nil {
+			// 某个 Scanner 异常时记录日志，并容错放行（Bypass），确保高可用
+			log.Printf("[WAF ERROR] [%s] 审计异常: %v", scanner.Name(), err)
+			continue
+		}
 
-		for chunk := range llmStream {			
-			currentChunk := chunk			
-			isBlocked := false
-			// 依次通过输出层逻辑			
-			for _, scanner := range e.OutputPipeline {				
-				res, err := scanner.ScanChunk(ctx, &currentChunk)				
-				if err != nil {					
-					continue				
-				}
-				if res.Action == ActionBlock {					
-					// 触发安全拦截，注入拒绝语，并切断后续流					
-					finalStream <- Chunk{						
-						Content: fmt.Sprintf("\n\n[WAF 拦截: %s]", res.Reason),						
-						IsLast:  true,					
-					}					
-					isBlocked = true					
-					break				
-				}
+		// 核心逻辑 1：一旦触发安全拦截，立刻早停并返回 BLOCK 状态与原因
+		if res.Action == ActionBlock {
+			return res
+		}
 
-				if res.Action == ActionRewrite {					
-					currentChunk.Content = res.Modified				
-					}			
-				}
-
-			if isBlocked {				
-				break // 终结网关向下游客户端的转发			
-			}
-
-			finalStream <- currentChunk		
-			}	
-		}()
+		// 核心逻辑 2：如果触发改写策略（如敏感词脱敏、格式修正），动态替换当前 Token
+		if res.Action == ActionRewrite {
+			chunk.Content = res.Modified
+		}
 	}
+
+	// 安全通过：当所有 Scanner 都放行后，返回 ALLOW
+	return &ScanResult{Action: ActionAllow}
+}
